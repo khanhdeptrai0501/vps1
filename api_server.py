@@ -675,39 +675,134 @@ def webhook_payment():
         content = data.get('content', '') or data.get('description', '')
         
         # Tìm order_id trong nội dung chuyển khoản
-        # Format: "Thanh toan ODR_XXXXXXXX" hoặc "ODR_XXXXXXXX"
+        # Format có thể là: "ODR_XXXXXXXX" hoặc "ODRXXXXXXXX" (không có underscore)
         import re
-        match = re.search(r'ODR_([A-Z0-9]{8})', content.upper())
+        
+        # Thử tìm với underscore trước
+        match = re.search(r'ODR[_]?([A-Z0-9]{8})', content.upper())
         
         if not match:
             logging.warning(f"[Webhook] No order_id found in: {content}")
             return jsonify({"success": True, "message": "No matching order"})
         
+        # Chuẩn hóa payment_ref với underscore
         payment_ref = f"ODR_{match.group(1)}"
         logging.info(f"[Webhook] Found payment_ref: {payment_ref}, amount: {amount}")
         
-        # TODO: Cập nhật order status trong database
-        # Cần import và sử dụng database từ telegram_bot
-        # 
-        # async with AsyncSessionLocal() as session:
-        #     result = await session.execute(
-        #         select(VerificationOrder).where(VerificationOrder.payment_ref == payment_ref)
-        #     )
-        #     order = result.scalar_one_or_none()
-        #     if order and order.status == OrderStatus.PENDING_PAYMENT:
-        #         order.status = OrderStatus.PAID
-        #         order.paid_at = datetime.utcnow()
-        #         await session.commit()
+        # Cập nhật database (sync) và notify user
+        try:
+            from database import SyncSessionLocal
+            from models import VerificationOrder, OrderStatus, User
+            from sqlalchemy import select
+            
+            with SyncSessionLocal() as session:
+                # Tìm order
+                result = session.execute(
+                    select(VerificationOrder).where(VerificationOrder.payment_ref == payment_ref)
+                )
+                order = result.scalar_one_or_none()
+                
+                if not order:
+                    logging.warning(f"[Webhook] Order not found: {payment_ref}")
+                    return jsonify({"success": True, "message": f"Order not found: {payment_ref}"})
+                
+                if order.status.value != "PENDING_PAYMENT":
+                    logging.info(f"[Webhook] Order already processed: {payment_ref}")
+                    return jsonify({"success": True, "message": "Already processed"})
+                
+                # Cập nhật trạng thái
+                order.status = OrderStatus.PAID
+                order.paid_at = datetime.now()
+                session.commit()
+                
+                logging.info(f"[Webhook] Order {payment_ref} marked as PAID")
+                
+                # Lấy user telegram_id để notify
+                user_result = session.execute(
+                    select(User).where(User.id == order.user_id)
+                )
+                user = user_result.scalar_one_or_none()
+                
+                if user:
+                    # Gửi notification đến internal endpoint để bot notify user
+                    try:
+                        import requests as req
+                        req.post(
+                            "http://localhost:5000/internal/notify-payment",
+                            json={
+                                "telegram_id": user.telegram_id,
+                                "order_id": order.id,
+                                "payment_ref": payment_ref,
+                                "amount": amount
+                            },
+                            timeout=5
+                        )
+                    except Exception as notify_err:
+                        logging.warning(f"[Webhook] Could not notify: {notify_err}")
+                
+        except Exception as db_err:
+            logging.exception(f"[Webhook] Database error: {db_err}")
         
         return jsonify({
             "success": True, 
             "payment_ref": payment_ref,
             "amount": amount,
-            "message": "Payment recorded"
+            "message": "Payment confirmed"
         })
         
     except Exception as e:
         logging.exception("[Webhook] Error processing payment")
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+# Biến global để lưu bot instance (được set từ telegram_bot.py)
+_telegram_notify_callback = None
+
+def set_telegram_notify_callback(callback):
+    """Set callback function để notify qua Telegram."""
+    global _telegram_notify_callback
+    _telegram_notify_callback = callback
+
+
+@app.route('/internal/notify-payment', methods=['POST'])
+def internal_notify_payment():
+    """Internal endpoint để notify user qua Telegram khi payment confirmed."""
+    try:
+        data = request.json or {}
+        telegram_id = data.get('telegram_id')
+        order_id = data.get('order_id')
+        payment_ref = data.get('payment_ref')
+        amount = data.get('amount', 0)
+        
+        logging.info(f"[Notify] Payment confirmed for user {telegram_id}, order {order_id}")
+        
+        # Ghi vào file để bot poll (fallback nếu không có callback)
+        notify_file = os.path.join(os.path.dirname(__file__), "pending_notifications.json")
+        try:
+            notifications = []
+            if os.path.exists(notify_file):
+                with open(notify_file, 'r') as f:
+                    notifications = json.load(f)
+            
+            notifications.append({
+                "type": "payment_confirmed",
+                "telegram_id": telegram_id,
+                "order_id": order_id,
+                "payment_ref": payment_ref,
+                "amount": amount,
+                "timestamp": datetime.now().isoformat()
+            })
+            
+            with open(notify_file, 'w') as f:
+                json.dump(notifications, f)
+                
+        except Exception as file_err:
+            logging.warning(f"[Notify] Could not write notification file: {file_err}")
+        
+        return jsonify({"success": True})
+        
+    except Exception as e:
+        logging.exception("[Notify] Error")
         return jsonify({"success": False, "error": str(e)}), 500
 
 

@@ -289,6 +289,12 @@ async def callback_back_main(callback: CallbackQuery, state: FSMContext):
 @router.callback_query(F.data == "verify_start")
 async def callback_verify_start(callback: CallbackQuery):
     """Start verification - choose payment method."""
+    # Check maintenance
+    async with AsyncSessionLocal() as session:
+        if await is_maintenance_mode(session):
+            await callback.answer("🔧 Bot đang bảo trì. Vui lòng quay lại sau!", show_alert=True)
+            return
+    
     text = (
         "🔎 **Xác minh GitHub Student**\n\n"
         "Chọn cách thanh toán:"
@@ -661,6 +667,19 @@ async def handle_redeem_code(message: Message, state: FSMContext):
 
 # ============== Admin Handlers ==============
 
+# Middleware check maintenance cho tất cả callbacks (trừ admin)
+async def check_maintenance_middleware(callback: CallbackQuery) -> bool:
+    """Check if maintenance mode is on. Return True if should block."""
+    if callback.data and callback.data.startswith("admin"):
+        return False  # Không block admin actions
+    
+    async with AsyncSessionLocal() as session:
+        if await is_maintenance_mode(session):
+            await callback.answer("🔧 Bot đang bảo trì. Vui lòng quay lại sau!", show_alert=True)
+            return True
+    return False
+
+
 @router.callback_query(F.data == "admin_panel")
 async def callback_admin_panel(callback: CallbackQuery):
     """Show admin panel."""
@@ -715,6 +734,381 @@ async def callback_admin_maintenance(callback: CallbackQuery):
         )
 
 
+@router.callback_query(F.data == "admin_users")
+async def callback_admin_users(callback: CallbackQuery, state: FSMContext):
+    """Admin: Manage users."""
+    await state.set_state(AdminUserSearch.waiting_query)
+    text = (
+        "👥 **Quản lý User**\n\n"
+        "Gửi Telegram ID hoặc @username để tìm user:\n"
+        "Ví dụ: `123456789` hoặc `@username`"
+    )
+    await callback.message.edit_text(text, reply_markup=admin_keyboard(), parse_mode="Markdown")
+
+
+@router.message(AdminUserSearch.waiting_query)
+async def handle_admin_user_search(message: Message, state: FSMContext):
+    """Handle admin user search."""
+    query = message.text.strip()
+    
+    async with AsyncSessionLocal() as session:
+        user = None
+        
+        # Tìm theo Telegram ID hoặc username
+        if query.startswith("@"):
+            username = query[1:]
+            result = await session.execute(
+                select(User).where(User.username == username)
+            )
+            user = result.scalar_one_or_none()
+        elif query.isdigit():
+            result = await session.execute(
+                select(User).where(User.telegram_id == int(query))
+            )
+            user = result.scalar_one_or_none()
+        
+        if not user:
+            await message.answer("❌ Không tìm thấy user!", reply_markup=admin_keyboard())
+            await state.clear()
+            return
+        
+        # Hiển thị thông tin user
+        text = (
+            f"👤 **User: {user.username or user.first_name or 'N/A'}**\n\n"
+            f"🆔 Telegram ID: `{user.telegram_id}`\n"
+            f"💰 Credits: **{user.credits:.1f}**\n"
+            f"🔗 Referral code: `{user.referral_code}`\n"
+            f"👫 Đã giới thiệu: **{user.referral_count}** người\n"
+            f"🚫 Bị cấm: {'✅ Có' if user.is_banned else '❌ Không'}\n"
+            f"📅 Tham gia: {user.created_at.strftime('%Y-%m-%d') if user.created_at else 'N/A'}"
+        )
+        
+        await state.update_data(target_user_id=user.id)
+        await message.answer(
+            text, 
+            reply_markup=admin_user_actions_keyboard(user.id, user.is_banned),
+            parse_mode="Markdown"
+        )
+        await state.clear()
+
+
+@router.callback_query(F.data.startswith("admin_ban:"))
+async def callback_admin_ban(callback: CallbackQuery):
+    """Admin: Ban user."""
+    user_id = int(callback.data.split(":")[1])
+    
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(select(User).where(User.id == user_id))
+        user = result.scalar_one_or_none()
+        
+        if user:
+            user.is_banned = True
+            user.ban_reason = "Bị cấm bởi admin"
+            await session.commit()
+            await callback.answer("✅ Đã cấm user!")
+            await callback.message.edit_text(
+                f"🚫 **Đã cấm user {user.username or user.telegram_id}**",
+                reply_markup=admin_keyboard(),
+                parse_mode="Markdown"
+            )
+        else:
+            await callback.answer("❌ Không tìm thấy user!", show_alert=True)
+
+
+@router.callback_query(F.data.startswith("admin_unban:"))
+async def callback_admin_unban(callback: CallbackQuery):
+    """Admin: Unban user."""
+    user_id = int(callback.data.split(":")[1])
+    
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(select(User).where(User.id == user_id))
+        user = result.scalar_one_or_none()
+        
+        if user:
+            user.is_banned = False
+            user.ban_reason = None
+            await session.commit()
+            await callback.answer("✅ Đã bỏ cấm user!")
+            await callback.message.edit_text(
+                f"✅ **Đã bỏ cấm user {user.username or user.telegram_id}**",
+                reply_markup=admin_keyboard(),
+                parse_mode="Markdown"
+            )
+        else:
+            await callback.answer("❌ Không tìm thấy user!", show_alert=True)
+
+
+@router.callback_query(F.data.startswith("admin_edit_credits:"))
+async def callback_admin_edit_credits(callback: CallbackQuery, state: FSMContext):
+    """Admin: Edit user credits."""
+    user_id = int(callback.data.split(":")[1])
+    await state.update_data(target_user_id=user_id)
+    await state.set_state(AdminEditCredits.waiting_amount)
+    
+    text = "💰 **Nhập số credits mới:**\n\nVí dụ: `5` hoặc `0.5`"
+    await callback.message.edit_text(text, reply_markup=admin_keyboard(), parse_mode="Markdown")
+
+
+@router.message(AdminEditCredits.waiting_amount)
+async def handle_admin_edit_credits(message: Message, state: FSMContext):
+    """Handle admin edit credits."""
+    try:
+        new_credits = float(message.text.strip())
+    except ValueError:
+        await message.answer("❌ Số credits không hợp lệ! Vui lòng nhập số.", reply_markup=admin_keyboard())
+        await state.clear()
+        return
+    
+    data = await state.get_data()
+    user_id = data.get("target_user_id")
+    
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(select(User).where(User.id == user_id))
+        user = result.scalar_one_or_none()
+        
+        if user:
+            old_credits = user.credits
+            user.credits = new_credits
+            await session.commit()
+            
+            await message.answer(
+                f"✅ **Đã cập nhật credits!**\n\n"
+                f"👤 User: {user.username or user.telegram_id}\n"
+                f"💰 Cũ: {old_credits:.1f} → Mới: {new_credits:.1f}",
+                reply_markup=admin_keyboard(),
+                parse_mode="Markdown"
+            )
+        else:
+            await message.answer("❌ Không tìm thấy user!", reply_markup=admin_keyboard())
+    
+    await state.clear()
+
+
+@router.callback_query(F.data == "admin_broadcast")
+async def callback_admin_broadcast(callback: CallbackQuery, state: FSMContext):
+    """Admin: Start broadcast."""
+    await state.set_state(AdminBroadcast.waiting_message)
+    text = (
+        "📢 **Gửi thông báo**\n\n"
+        "Nhập nội dung thông báo (hỗ trợ Markdown):\n"
+        "Thông báo sẽ được gửi đến TẤT CẢ users."
+    )
+    await callback.message.edit_text(text, reply_markup=admin_keyboard(), parse_mode="Markdown")
+
+
+@router.message(AdminBroadcast.waiting_message)
+async def handle_admin_broadcast(message: Message, state: FSMContext):
+    """Handle admin broadcast."""
+    broadcast_text = message.text.strip()
+    
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(select(User).where(User.is_banned == False))
+        users = result.scalars().all()
+        
+        success = 0
+        failed = 0
+        
+        status_msg = await message.answer(f"📤 Đang gửi đến {len(users)} users...")
+        
+        for user in users:
+            try:
+                await bot.send_message(
+                    user.telegram_id,
+                    f"📢 **Thông báo**\n\n{broadcast_text}",
+                    parse_mode="Markdown"
+                )
+                success += 1
+            except Exception:
+                failed += 1
+            
+            # Rate limit
+            if success % 20 == 0:
+                await asyncio.sleep(1)
+        
+        await status_msg.edit_text(
+            f"✅ **Broadcast hoàn tất!**\n\n"
+            f"✓ Thành công: {success}\n"
+            f"✗ Thất bại: {failed}",
+            reply_markup=admin_keyboard(),
+            parse_mode="Markdown"
+        )
+    
+    await state.clear()
+
+
+@router.callback_query(F.data == "admin_codes")
+async def callback_admin_codes(callback: CallbackQuery):
+    """Admin: Manage promo codes."""
+    await callback.message.edit_text(
+        "🎁 **Quản lý Promo Codes**",
+        reply_markup=admin_codes_keyboard(),
+        parse_mode="Markdown"
+    )
+
+
+@router.callback_query(F.data == "admin_create_code")
+async def callback_admin_create_code(callback: CallbackQuery, state: FSMContext):
+    """Admin: Create new promo code."""
+    from states import AdminCreateCode
+    await state.set_state(AdminCreateCode.waiting_code)
+    text = (
+        "➕ **Tạo mã mới**\n\n"
+        "Nhập theo format:\n"
+        "`CODE CREDITS MAX_USES`\n\n"
+        "Ví dụ: `GIVEAWAY10 1.0 100`\n"
+        "(Mã GIVEAWAY10, 1.0 credits, tối đa 100 người dùng)"
+    )
+    await callback.message.edit_text(text, reply_markup=admin_keyboard(), parse_mode="Markdown")
+
+
+@router.callback_query(F.data == "admin_list_codes")
+async def callback_admin_list_codes(callback: CallbackQuery):
+    """Admin: List all promo codes."""
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(select(PromoCode).order_by(PromoCode.created_at.desc()).limit(10))
+        codes = result.scalars().all()
+        
+        if not codes:
+            text = "📋 **Danh sách codes**\n\nChưa có code nào."
+        else:
+            lines = ["📋 **Danh sách codes**\n"]
+            for code in codes:
+                status = "✅" if code.is_valid() else "❌"
+                lines.append(
+                    f"{status} `{code.code}` - {code.credits_amount} credits "
+                    f"({code.current_uses}/{code.max_uses or '∞'})"
+                )
+            text = "\n".join(lines)
+        
+        await callback.message.edit_text(text, reply_markup=admin_codes_keyboard(), parse_mode="Markdown")
+
+
+from states import AdminCreateCode
+
+@router.message(AdminCreateCode.waiting_code)
+async def handle_admin_create_code(message: Message, state: FSMContext):
+    """Handle admin create promo code."""
+    parts = message.text.strip().split()
+    
+    if len(parts) < 2:
+        await message.answer(
+            "❌ Sai format! Dùng: `CODE CREDITS [MAX_USES]`\n"
+            "Ví dụ: `GIVEAWAY10 1.0 100`",
+            reply_markup=admin_keyboard(),
+            parse_mode="Markdown"
+        )
+        await state.clear()
+        return
+    
+    code = parts[0].upper()
+    try:
+        credits = float(parts[1])
+        max_uses = int(parts[2]) if len(parts) > 2 else None
+    except ValueError:
+        await message.answer(
+            "❌ Credits hoặc Max Uses không hợp lệ!",
+            reply_markup=admin_keyboard()
+        )
+        await state.clear()
+        return
+    
+    async with AsyncSessionLocal() as session:
+        # Check if code exists
+        existing = await session.execute(
+            select(PromoCode).where(PromoCode.code == code)
+        )
+        if existing.scalar_one_or_none():
+            await message.answer(
+                f"❌ Mã `{code}` đã tồn tại!",
+                reply_markup=admin_keyboard(),
+                parse_mode="Markdown"
+            )
+            await state.clear()
+            return
+        
+        # Create new code
+        new_code = PromoCode(
+            code=code,
+            credits_amount=credits,
+            max_uses=max_uses,
+            is_active=True
+        )
+        session.add(new_code)
+        await session.commit()
+        
+        await message.answer(
+            f"✅ **Đã tạo mã mới!**\n\n"
+            f"🎁 Code: `{code}`\n"
+            f"💰 Credits: {credits}\n"
+            f"👥 Tối đa: {max_uses or '∞'} người",
+            reply_markup=admin_codes_keyboard(),
+            parse_mode="Markdown"
+        )
+    
+    await state.clear()
+
+
+# ============== Notification Poller ==============
+
+async def poll_payment_notifications():
+    """Background task để check và notify user khi có payment confirmed."""
+    import os
+    import json
+    
+    notify_file = os.path.join(os.path.dirname(__file__), "pending_notifications.json")
+    
+    while True:
+        try:
+            await asyncio.sleep(2)  # Check mỗi 2 giây
+            
+            if not os.path.exists(notify_file):
+                continue
+            
+            with open(notify_file, 'r') as f:
+                notifications = json.load(f)
+            
+            if not notifications:
+                continue
+            
+            # Xử lý từng notification
+            processed = []
+            for notif in notifications:
+                if notif.get('type') == 'payment_confirmed':
+                    telegram_id = notif.get('telegram_id')
+                    order_id = notif.get('order_id')
+                    payment_ref = notif.get('payment_ref')
+                    amount = notif.get('amount', 0)
+                    
+                    try:
+                        await bot.send_message(
+                            telegram_id,
+                            f"✅ **Thanh toán thành công!**\n\n"
+                            f"💰 Số tiền: **{amount:,}đ**\n"
+                            f"📝 Mã đơn: `{payment_ref}`\n\n"
+                            f"Gửi cookie GitHub của bạn để tiếp tục:",
+                            reply_markup=cancel_keyboard(),
+                            parse_mode="Markdown"
+                        )
+                        
+                        # Set state cho user
+                        # Cần lưu order_id vào FSM state
+                        logger.info(f"[Notify] Notified user {telegram_id} about payment {payment_ref}")
+                        processed.append(notif)
+                        
+                    except Exception as e:
+                        logger.warning(f"[Notify] Failed to notify {telegram_id}: {e}")
+                        processed.append(notif)  # Bỏ qua để không spam
+            
+            # Xóa notifications đã xử lý
+            remaining = [n for n in notifications if n not in processed]
+            with open(notify_file, 'w') as f:
+                json.dump(remaining, f)
+                
+        except Exception as e:
+            logger.warning(f"[Notify Poller] Error: {e}")
+            await asyncio.sleep(5)
+
+
 # ============== Main ==============
 
 async def main():
@@ -724,6 +1118,10 @@ async def main():
     
     logger.info("Starting bot...")
     dp.include_router(router)
+    
+    # Start notification poller
+    logger.info("Starting notification poller...")
+    asyncio.create_task(poll_payment_notifications())
     
     await bot.delete_webhook(drop_pending_updates=True)
     await dp.start_polling(bot)
