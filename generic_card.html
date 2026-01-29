@@ -1,0 +1,360 @@
+<!DOCTYPE html>
+<html lang="id">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Kartu Tanda Mahasiswa</title>
+    <link href="https://fonts.googleapis.com/css2?family=Dancing+Script:wght@700&display=swap" rel="stylesheet">
+    <style>
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+            font-family: Arial, Helvetica, sans-serif;
+        }
+
+        body,
+        html {
+            width: 700px !important;
+            height: 550px !important;
+            background: transparent !important;
+            overflow: hidden !important;
+        }
+
+        .card {
+            width: 700px;
+            height: 550px;
+            background-color: #fff;
+            border-radius: 0;
+            box-shadow: none;
+            overflow: hidden;
+            position: absolute;
+            top: 0;
+            left: 0;
+            display: flex;
+            flex-direction: column;
+            border: 1px solid #ddd;
+        }
+
+        .header {
+            background: linear-gradient(90deg, #2b57d6 0%, #4a74e8 100%);
+            height: 100px;
+            padding: 0 25px;
+            display: flex;
+            align-items: center;
+            position: relative;
+            z-index: 5;
+        }
+
+        .header-logo {
+            width: 80px;
+            height: 80px;
+            margin-right: 20px;
+            object-fit: contain;
+            filter: drop-shadow(0 2px 3px rgba(0, 0, 0, 0.2));
+            z-index: 2;
+            border-radius: 50%;
+            background: white;
+            padding: 5px;
+        }
+
+        .header-text-container {
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            flex: 1;
+        }
+
+        .header-text h1 {
+            color: white;
+            font-family: 'Times New Roman', Times, serif;
+            font-size: 28px;
+            font-weight: bold;
+            margin-bottom: 2px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            line-height: 1.2;
+            text-shadow: 1px 1px 2px rgba(0, 0, 0, 0.3);
+        }
+
+        .header-text h2 {
+            font-family: Arial, sans-serif;
+            font-size: 14px;
+            font-weight: normal;
+            letter-spacing: 1px;
+            text-transform: uppercase;
+            color: #f4d03f;
+            margin-top: 5px;
+        }
+
+        .header-line {
+            position: absolute;
+            bottom: 8px;
+            left: 125px;
+            right: 0;
+            height: 3px;
+            background-color: #d4af37;
+            z-index: 1;
+        }
+
+        .main-content {
+            padding: 25px 30px 15px 30px;
+            display: flex;
+            flex: 1;
+            background-image: radial-gradient(#e0e0e0 1px, transparent 1px);
+            background-size: 10px 10px;
+        }
+
+        .photo-column {
+            width: 30%;
+            padding-right: 20px;
+        }
+
+        .photo-frame {
+            background-color: #fff;
+            padding: 5px;
+            border: 3px solid #2b57d6;
+            border-radius: 2px;
+            box-shadow: 0 2px 5px rgba(0, 0, 0, 0.1);
+        }
+
+        .student-photo {
+            width: 100%;
+            height: auto;
+            aspect-ratio: 3/4;
+            object-fit: cover;
+            display: block;
+        }
+
+        .info-column {
+            width: 72%;
+            display: flex;
+            flex-direction: column;
+        }
+
+        .student-name {
+            font-size: 24px;
+            font-weight: 800;
+            color: #000;
+            text-transform: uppercase;
+            border-bottom: 2px solid #000;
+            padding-bottom: 8px;
+            margin-bottom: 20px;
+            width: 100%;
+        }
+
+        .data-table {
+            width: 100%;
+            font-size: 16px;
+            border-collapse: collapse;
+        }
+
+        .data-table td {
+            padding-bottom: 14px;
+            vertical-align: top;
+        }
+
+        .label {
+            font-weight: bold;
+            color: #2b57d6;
+            width: 150px;
+            text-transform: uppercase;
+        }
+
+        .value {
+            font-weight: 600;
+            color: #333;
+        }
+
+        .status-row {
+            margin-top: auto;
+            display: flex;
+            gap: 8px;
+            padding-bottom: 5px;
+        }
+
+        .badge {
+            padding: 6px 18px;
+            text-align: center;
+            font-weight: bold;
+            font-size: 13px;
+            border: 1px solid #ccc;
+        }
+
+        .badge-year {
+            background: #dbe4ff;
+            color: #000;
+        }
+
+        .badge-active {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background: #1a5c48;
+            color: #fff;
+        }
+
+        .footer-section {
+            position: relative;
+            background-image: radial-gradient(#e0e0e0 1px, transparent 1px);
+            background-size: 10px 10px;
+            padding-bottom: 8px;
+        }
+
+        .footer-content {
+            padding: 0 30px;
+            display: flex;
+            align-items: flex-end;
+            margin-bottom: 8px;
+        }
+
+        .signature-block {
+            min-width: 220px;
+        }
+
+        .headmaster-name {
+            font-size: 13px;
+            font-weight: bold;
+            color: #000;
+            border-top: 1px solid #000;
+            padding-top: 3px;
+            display: inline-block;
+            margin-top: 8px;
+            min-width: 180px;
+        }
+
+        .nip {
+            font-size: 12px;
+            color: #444;
+            margin-top: 3px;
+        }
+
+        .stamp-img {
+            width: 80px;
+            height: 80px;
+            object-fit: contain;
+            margin-left: 280px;
+            margin-bottom: 8px;
+            opacity: 0.3;
+            filter: grayscale(100%);
+        }
+
+        .footer-line-full {
+            height: 3px;
+            background-color: #d4af37;
+            width: 100%;
+            margin-bottom: 8px;
+        }
+
+        .bottom-row {
+            padding: 8px 30px 12px 30px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            position: relative;
+        }
+
+        .validity-text {
+            font-size: 13px;
+            color: #000;
+            text-transform: uppercase;
+        }
+
+        .qr-code {
+            position: absolute;
+            bottom: 12px;
+            right: 20px;
+            width: 70px;
+            height: 70px;
+            background: #fff;
+            padding: 3px;
+        }
+    </style>
+</head>
+
+<body>
+    <div class="card" id="studentCard">
+        <div class="header">
+            <img src="https://upload.wikimedia.org/wikipedia/commons/thumb/a/a7/Camponotus_flavomarginatus_ant.jpg/220px-Camponotus_flavomarginatus_ant.jpg"
+                alt="Logo" class="header-logo" id="cardLogo" crossorigin="anonymous">
+            <div class="header-text-container">
+                <div class="header-text">
+                    <h1 id="cardSchoolName">INSTITUTION NAME</h1>
+                    <h2>STUDENT ID CARD</h2>
+                </div>
+            </div>
+            <div class="header-line"></div>
+        </div>
+
+        <div class="main-content">
+            <div class="photo-column">
+                <div class="photo-frame">
+                    <img src="https://upload.wikimedia.org/wikipedia/commons/7/7c/Profile_avatar_placeholder_large.png"
+                        alt="Foto Mahasiswa" class="student-photo" id="cardPhoto" crossorigin="anonymous">
+                </div>
+            </div>
+
+            <div class="info-column">
+                <div>
+                    <div class="student-name" id="cardNama">FULL NAME</div>
+
+                    <table class="data-table">
+                        <tr>
+                            <td class="label">STUDENT ID</td>
+                            <td>:</td>
+                            <td class="value" id="cardNIM">-</td>
+                        </tr>
+                        <tr>
+                            <td class="label">DATE OF BIRTH</td>
+                            <td>:</td>
+                            <td class="value" id="cardTTL">-</td>
+                        </tr>
+                        <tr>
+                            <td class="label">MAJOR</td>
+                            <td>:</td>
+                            <td class="value" id="cardProdi">-</td>
+                        </tr>
+                        <tr>
+                            <td class="label">ISSUED</td>
+                            <td>:</td>
+                            <td class="value" id="cardIssued">-</td>
+                        </tr>
+                        <tr>
+                            <td class="label">VALID THRU</td>
+                            <td>:</td>
+                            <td class="value" id="cardValidThru">-</td>
+                        </tr>
+                    </table>
+                </div>
+
+                <div class="status-row">
+                    <div class="badge badge-active">ACTIVE STUDENT</div>
+                </div>
+            </div>
+        </div>
+
+        <div class="footer-section">
+            <div class="footer-content">
+                <div class="signature-block">
+                    <div class="headmaster-name" id="cardRektor">Rector</div>
+                    <div class="nip" id="cardNIP">ID: -</div>
+                </div>
+
+                <img src="https://upload.wikimedia.org/wikipedia/commons/7/7c/Profile_avatar_placeholder_large.png"
+                    alt="Stempel" class="stamp-img" id="cardStamp" crossorigin="anonymous">
+            </div>
+
+            <div class="footer-line-full"></div>
+
+            <div class="bottom-row">
+                <div class="validity-text" id="cardValidity">VALID DURING ENROLLMENT PERIOD</div>
+            </div>
+
+            <img src="https://api.qrserver.com/v1/create-qr-code/?size=150x150&data=STUDENT" class="qr-code" id="cardQR"
+                alt="QR" crossorigin="anonymous">
+        </div>
+    </div>
+</body>
+
+</html>

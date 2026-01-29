@@ -1,0 +1,21 @@
+Nama       : Fire Fighting University
+image2url  : https://image2url.com/r2/default/images/1769592899104-06537eb1-478d-4663-967f-c659c0f12c1e.png
+ID         : 122738
+Lokasi     : 243 Khuất Duy Tiến, Nhân Chính, Thanh Xuân, Hà Nội, Việt Nam
+Lat        : 21.0007965
+Long       : 105.7920846
+--------------------------------------------------
+Nama       : FPT Polytechnic College
+image2url  : https://image2url.com/r2/default/images/1769592995975-60833566-001b-4a08-b6cd-da9c5348b53b.jpg
+ID         : 116203
+Lokasi     : 2PQW+6JJ Tòa nhà FPT Polytechnic., Cổng số 2, 13 Trịnh Văn Bô, Xuân Phương, Nam Từ Liêm, Hà Nội 100000, Việt Nam
+Lat        : 21.0379392
+Long       : 105.7468417
+--------------------------------------------------
+Nama       : Hanoi College of Art
+image2url  : https://image2url.com/r2/default/images/1769623818867-c04471aa-795a-4ce7-b2a5-02ea7fb2a8c8.webp
+ID         : 131935
+Lokasi     : 7 P. Hai Bà Trưng, Phan Chu Trinh, Hoàn Kiếm, Hà Nội 100000, Vijetnam
+Lat        : 21.0230389
+Long       : 105.8534298
+--------------------------------------------------
