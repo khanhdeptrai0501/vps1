@@ -43,7 +43,7 @@ class Settings(BaseSettings):
     
     # Pricing
     verification_price: int = 30000  # VND
-    referral_bonus_credits: int = 1
+    referral_bonus_credits: float = 0.1  # Credits cho mỗi referral (có thể là số thập phân)
     
     @property
     def database_url(self) -> str:

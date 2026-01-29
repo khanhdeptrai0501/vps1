@@ -152,13 +152,59 @@ async def cmd_start(message: Message, state: FSMContext):
     """Handle /start command."""
     await state.clear()
     
+    # Parse referral code từ deep link: /start ref_XXXXXXXX
+    referral_code = None
+    if message.text and len(message.text.split()) > 1:
+        args = message.text.split()[1]  # Lấy phần sau /start
+        if args.startswith("ref_"):
+            referral_code = args[4:].upper()  # Bỏ "ref_" prefix
+            logger.info(f"Referral code detected: {referral_code}")
+    
     async with AsyncSessionLocal() as session:
+        # Kiểm tra user đã tồn tại chưa
+        result = await session.execute(
+            select(User).where(User.telegram_id == message.from_user.id)
+        )
+        existing_user = result.scalar_one_or_none()
+        is_new_user = existing_user is None
+        
         user = await get_or_create_user(
             session,
             message.from_user.id,
             message.from_user.username,
             message.from_user.first_name,
         )
+        
+        # Xử lý referral chỉ cho user MỚI
+        if is_new_user and referral_code and not user.referred_by_id:
+            # Tìm người giới thiệu
+            referrer_result = await session.execute(
+                select(User).where(User.referral_code == referral_code)
+            )
+            referrer = referrer_result.scalar_one_or_none()
+            
+            if referrer and referrer.id != user.id:
+                # Liên kết người được giới thiệu với người giới thiệu
+                user.referred_by_id = referrer.id
+                
+                # Cộng credits cho người giới thiệu
+                referrer.credits += settings.referral_bonus_credits
+                referrer.referral_count += 1
+                
+                await session.commit()
+                logger.info(f"Referral success: {user.telegram_id} referred by {referrer.telegram_id}, +{settings.referral_bonus_credits} credits")
+                
+                # Thông báo cho người giới thiệu
+                try:
+                    await bot.send_message(
+                        referrer.telegram_id,
+                        f"🎉 **Có người mới tham gia qua link của bạn!**\n\n"
+                        f"➕ Bạn nhận được **{settings.referral_bonus_credits}** credits\n"
+                        f"💰 Tổng credits: **{referrer.credits:.1f}**",
+                        parse_mode="Markdown"
+                    )
+                except Exception as e:
+                    logger.warning(f"Could not notify referrer: {e}")
         
         # Check banned
         if user.is_banned:

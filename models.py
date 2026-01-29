@@ -9,7 +9,7 @@ import string
 
 from sqlalchemy import (
     BigInteger, String, Text, Integer, Boolean,
-    DateTime, Enum, ForeignKey, JSON, Index,
+    DateTime, Enum, ForeignKey, JSON, Index, Float,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
@@ -56,7 +56,7 @@ class User(Base):
     first_name: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
     
     # Credits system
-    credits: Mapped[int] = mapped_column(Integer, default=0)
+    credits: Mapped[float] = mapped_column(Float, default=0.0)
     
     # Referral system
     referral_code: Mapped[str] = mapped_column(String(16), unique=True, nullable=False)
