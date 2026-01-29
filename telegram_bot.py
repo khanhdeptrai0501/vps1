@@ -41,6 +41,10 @@ storage = MemoryStorage()
 dp = Dispatcher(storage=storage)
 router = Router()
 
+# Global dict lưu pending orders đã thanh toán nhưng chưa gửi cookie
+# Format: {telegram_id: order_id}
+pending_paid_orders: dict[int, str] = {}
+
 
 # ============== Helpers ==============
 
@@ -433,6 +437,38 @@ async def callback_check_payment(callback: CallbackQuery, state: FSMContext):
             await callback.message.edit_text(text, reply_markup=cancel_keyboard(), parse_mode="Markdown")
         else:
             await callback.answer("⏳ Chưa nhận được thanh toán. Vui lòng thử lại sau 30 giây.", show_alert=True)
+
+
+@router.callback_query(F.data.startswith("cancel_order:"))
+async def callback_cancel_order(callback: CallbackQuery, state: FSMContext):
+    """Cancel a pending order."""
+    order_id = callback.data.split(":")[1]
+    
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            select(VerificationOrder).where(VerificationOrder.id == order_id)
+        )
+        order = result.scalar_one_or_none()
+        
+        if order:
+            order.status = OrderStatus.CANCELLED
+            await session.commit()
+    
+    await state.clear()
+    
+    # Xóa khỏi pending_paid_orders nếu có
+    try:
+        from telegram_bot import pending_paid_orders
+        if callback.from_user.id in pending_paid_orders:
+            del pending_paid_orders[callback.from_user.id]
+    except:
+        pass
+    
+    await callback.answer("✅ Đã hủy đơn hàng!")
+    
+    async with AsyncSessionLocal() as session:
+        user = await get_or_create_user(session, callback.from_user.id)
+        await show_main_menu(callback, user)
 
 
 @router.message(Verification.waiting_cookie)
@@ -1048,6 +1084,113 @@ async def handle_admin_create_code(message: Message, state: FSMContext):
     await state.clear()
 
 
+# ============== Catch-All Cookie Handler ==============
+
+@router.message(F.text)
+async def handle_pending_payment_cookie(message: Message, state: FSMContext):
+    """
+    Catch-all handler để xử lý cookie từ users đã thanh toán qua QR 
+    (được notify bởi webhook, không qua FSM state).
+    
+    Handler này phải để CUỐI CÙNG sau tất cả các message handlers khác.
+    """
+    telegram_id = message.from_user.id
+    
+    # Kiểm tra trong pending_paid_orders (được set bởi notification poller)
+    if telegram_id not in pending_paid_orders:
+        return  # Không làm gì, để các handler khác xử lý
+    
+    order_id = pending_paid_orders[telegram_id]
+    cookie = message.text.strip()
+    
+    # Validate cookie
+    if len(cookie) < 50 or "user_session" not in cookie.lower():
+        await message.answer(
+            "❌ Cookie không hợp lệ!\n\n"
+            "Cookie cần chứa `user_session`. Vui lòng thử lại.",
+            reply_markup=cancel_keyboard(),
+            parse_mode="Markdown"
+        )
+        return
+    
+    # Xóa khỏi pending_paid_orders
+    del pending_paid_orders[telegram_id]
+    
+    # Xử lý cookie
+    await message.answer(
+        "⏳ **Đang xác minh GitHub Student...**\n\n"
+        "Quá trình này có thể mất 1-2 phút, vui lòng đợi.",
+        parse_mode="Markdown"
+    )
+    
+    try:
+        async with AsyncSessionLocal() as session:
+            # Cập nhật order
+            result = await session.execute(
+                select(VerificationOrder).where(VerificationOrder.id == order_id)
+            )
+            order = result.scalar_one_or_none()
+            
+            if order:
+                order.status = OrderStatus.PROCESSING
+                order.cookie_data = cookie
+                await session.commit()
+        
+        # Gọi API server để process
+        import aiohttp
+        async with aiohttp.ClientSession() as http_session:
+            async with http_session.post(
+                f"{settings.api_server_url}/prepare",
+                json={"cookie": cookie, "order_id": order_id},
+                timeout=aiohttp.ClientTimeout(total=120)
+            ) as response:
+                result = await response.json()
+                
+                if result.get("success"):
+                    await message.answer(
+                        "✅ **Thành công!**\n\n"
+                        "Yêu cầu xác minh đã được gửi đến GitHub.\n"
+                        "Vui lòng chờ email xác nhận từ GitHub trong 1-3 ngày.",
+                        reply_markup=back_main_keyboard(),
+                        parse_mode="Markdown"
+                    )
+                    
+                    async with AsyncSessionLocal() as session:
+                        result = await session.execute(
+                            select(VerificationOrder).where(VerificationOrder.id == order_id)
+                        )
+                        order = result.scalar_one_or_none()
+                        if order:
+                            order.status = OrderStatus.COMPLETED
+                            await session.commit()
+                else:
+                    error = result.get("error", "Unknown error")
+                    await message.answer(
+                        f"❌ **Lỗi xác minh:**\n\n{error}\n\n"
+                        "Vui lòng thử lại sau hoặc liên hệ admin.",
+                        reply_markup=back_main_keyboard(),
+                        parse_mode="Markdown"
+                    )
+                    
+                    async with AsyncSessionLocal() as session:
+                        result = await session.execute(
+                            select(VerificationOrder).where(VerificationOrder.id == order_id)
+                        )
+                        order = result.scalar_one_or_none()
+                        if order:
+                            order.status = OrderStatus.FAILED
+                            order.error_message = error
+                            await session.commit()
+                            
+    except Exception as e:
+        logger.exception(f"Error processing cookie: {e}")
+        await message.answer(
+            f"❌ **Lỗi hệ thống:**\n\n{str(e)}\n\nVui lòng thử lại sau.",
+            reply_markup=back_main_keyboard(),
+            parse_mode="Markdown"
+        )
+
+
 # ============== Notification Poller ==============
 
 async def poll_payment_notifications():
@@ -1080,19 +1223,21 @@ async def poll_payment_notifications():
                     amount = notif.get('amount', 0)
                     
                     try:
+                        # Lưu order_id vào global dict
+                        pending_paid_orders[telegram_id] = order_id
+                        
                         await bot.send_message(
                             telegram_id,
                             f"✅ **Thanh toán thành công!**\n\n"
                             f"💰 Số tiền: **{amount:,}đ**\n"
                             f"📝 Mã đơn: `{payment_ref}`\n\n"
-                            f"Gửi cookie GitHub của bạn để tiếp tục:",
+                            f"📝 **Gửi cookie GitHub của bạn** để tiếp tục xác minh:\n"
+                            f"*(Lấy từ trình duyệt: F12 → Application → Cookies → github.com)*",
                             reply_markup=cancel_keyboard(),
                             parse_mode="Markdown"
                         )
                         
-                        # Set state cho user
-                        # Cần lưu order_id vào FSM state
-                        logger.info(f"[Notify] Notified user {telegram_id} about payment {payment_ref}")
+                        logger.info(f"[Notify] Notified user {telegram_id} about payment {payment_ref}, order {order_id}")
                         processed.append(notif)
                         
                     except Exception as e:
@@ -1106,6 +1251,7 @@ async def poll_payment_notifications():
                 
         except Exception as e:
             logger.warning(f"[Notify Poller] Error: {e}")
+            await asyncio.sleep(5)
             await asyncio.sleep(5)
 
 
