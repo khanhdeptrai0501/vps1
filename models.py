@@ -31,10 +31,15 @@ class OrderStatus(PyEnum):
     """Verification order statuses."""
     PENDING_PAYMENT = "PENDING_PAYMENT"
     PAID = "PAID"
+    QUEUED = "QUEUED"              # Đang trong hàng đợi
     PROCESSING = "PROCESSING"
     SUBMITTING = "SUBMITTING"
+    SUBMITTED = "SUBMITTED"         # Đã submit, đang chờ kết quả
+    CHECKING = "CHECKING"           # Đang check status
+    RETRYING = "RETRYING"           # Đang retry
     COMPLETED = "COMPLETED"
     FAILED = "FAILED"
+    REFUNDED = "REFUNDED"           # Đã hoàn tiền
     CANCELLED = "CANCELLED"
 
 
@@ -42,6 +47,21 @@ class PaymentType(PyEnum):
     """Payment types."""
     CREDIT = "CREDIT"
     QR_PAYMENT = "QR_PAYMENT"
+
+
+class GitHubStatus(PyEnum):
+    """GitHub verification status."""
+    PENDING = "PENDING"
+    APPROVED = "APPROVED"
+    DENIED = "DENIED"
+
+
+class QueueStatus(PyEnum):
+    """Queue item status."""
+    WAITING = "WAITING"
+    PROCESSING = "PROCESSING"
+    DONE = "DONE"
+    CANCELLED = "CANCELLED"
 
 
 # ============== Models ==============
@@ -173,6 +193,21 @@ class VerificationOrder(Base):
     geo_lat: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
     geo_lng: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
     
+    # Current step for progress display (b0-b7)
+    current_step: Mapped[Optional[str]] = mapped_column(String(10), nullable=True)
+    
+    # Retry & Check system
+    attempt_count: Mapped[int] = mapped_column(Integer, default=0)  # 0-3
+    last_check_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    github_status: Mapped[Optional[GitHubStatus]] = mapped_column(
+        Enum(GitHubStatus), nullable=True
+    )
+    denial_reasons: Mapped[Optional[str]] = mapped_column(Text, nullable=True)  # JSON
+    refunded: Mapped[bool] = mapped_column(Boolean, default=False)
+    
+    # Progress message ID (for editing)
+    progress_message_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
+    
     # Result
     submit_result: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     error_message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
@@ -182,11 +217,40 @@ class VerificationOrder(Base):
         DateTime, default=datetime.utcnow, nullable=False
     )
     paid_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    submitted_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     
     __table_args__ = (
         Index("idx_user_status", "user_id", "status"),
         Index("idx_payment_ref", "payment_ref"),
+        Index("idx_status_attempt", "status", "attempt_count"),
+    )
+
+
+class VerificationQueue(Base):
+    """Queue for verification orders."""
+    __tablename__ = "verification_queue"
+    
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("users.id"), nullable=False
+    )
+    order_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("verification_orders.id"), nullable=False
+    )
+    
+    position: Mapped[int] = mapped_column(Integer, nullable=False)  # 1, 2, 3...
+    status: Mapped[QueueStatus] = mapped_column(
+        Enum(QueueStatus), default=QueueStatus.WAITING, nullable=False
+    )
+    
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, default=datetime.utcnow, nullable=False
+    )
+    started_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    
+    __table_args__ = (
+        Index("idx_queue_status_position", "status", "position"),
     )
 
 
@@ -213,3 +277,4 @@ class PaymentLog(Base):
     received_at: Mapped[datetime] = mapped_column(
         DateTime, default=datetime.utcnow, nullable=False
     )
+

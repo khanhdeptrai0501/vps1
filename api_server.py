@@ -841,18 +841,131 @@ def callback_submit():
         logging.exception("[Callback] Error")
         return jsonify({"success": False, "error": str(e)}), 500
 
+
+@app.route('/check-status', methods=['POST'])
+def check_github_status():
+    """
+    Check GitHub Student verification status.
+    
+    Request:
+    {
+        "cookie": "GitHub cookie string"
+    }
+    
+    Response:
+    {
+        "success": true,
+        "status": "approved" | "denied" | "pending",
+        "reasons": ["reason1", "reason2"] // if denied
+    }
+    """
+    try:
+        data = request.json
+        cookie = data.get('cookie')
+        
+        if not cookie:
+            return jsonify({"success": False, "error": "Cookie required"}), 400
+        
+        # Parse cookie
+        if isinstance(cookie, str):
+            cookies = {}
+            for item in cookie.split(';'):
+                if '=' in item:
+                    key, val = item.strip().split('=', 1)
+                    cookies[key.strip()] = val.strip()
+        else:
+            cookies = cookie
+        
+        # Request GitHub education discount requests page
+        url = "https://education.github.com/discount_requests"
+        
+        headers = {
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.9',
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+            'Referer': 'https://education.github.com/pack',
+        }
+        
+        if USE_CURL_CFFI:
+            sess = cffi_requests.Session()
+            resp = sess.get(url, headers=headers, cookies=cookies, impersonate="chrome120")
+        else:
+            sess = std_requests.Session()
+            resp = sess.get(url, headers=headers, cookies=cookies)
+        
+        if resp.status_code != 200:
+            logging.warning(f"[CheckStatus] HTTP {resp.status_code}")
+            return jsonify({
+                "success": True,
+                "status": "pending",
+                "message": "Could not fetch status"
+            })
+        
+        # Parse HTML to find latest application status
+        soup = BeautifulSoup(resp.text, 'html.parser')
+        
+        # Look for status indicators
+        status = "pending"
+        reasons = []
+        
+        # Check for "Approved" status
+        approved_elements = soup.find_all(text=re.compile(r'Approved', re.I))
+        if approved_elements:
+            for elem in approved_elements:
+                parent = elem.find_parent(['div', 'span', 'p', 'li'])
+                if parent and 'Application Type: Student' in str(parent.parent):
+                    status = "approved"
+                    break
+        
+        # Check for "Denied" status
+        denied_elements = soup.find_all(text=re.compile(r'Denied', re.I))
+        if denied_elements and status != "approved":
+            for elem in denied_elements:
+                parent = elem.find_parent(['div', 'span', 'p', 'li'])
+                if parent and 'Application Type: Student' in str(parent.parent):
+                    status = "denied"
+                    
+                    # Try to find denial reasons
+                    reasons_section = parent.find_next('ul')
+                    if reasons_section:
+                        for li in reasons_section.find_all('li'):
+                            reason_text = li.get_text(strip=True)
+                            if reason_text:
+                                reasons.append(reason_text)
+                    break
+        
+        # Check for "Under Review" / "Pending"
+        if status == "pending":
+            pending_elements = soup.find_all(text=re.compile(r'(Under Review|Pending|Submitted)', re.I))
+            if pending_elements:
+                status = "pending"
+        
+        logging.info(f"[CheckStatus] Status: {status}")
+        
+        return jsonify({
+            "success": True,
+            "status": status,
+            "reasons": reasons if reasons else None
+        })
+        
+    except Exception as e:
+        logging.exception("[CheckStatus] Error")
+        return jsonify({"success": False, "error": str(e), "status": "pending"}), 500
+
+
 # ============ MAIN ============
 
 if __name__ == '__main__':
     print("""
 ╔═══════════════════════════════════════════════════════════╗
-║  🖥️  GitHub Student API Server v3.0                       ║
+║  🖥️  GitHub Student API Server v3.1                       ║
 ╠═══════════════════════════════════════════════════════════╣
 ║  Endpoints:                                               ║
-║    GET  /          - Trang chủ                            ║
-║    GET  /health    - Kiểm tra server                      ║
-║    POST /render    - Render HTML → base64                 ║
-║    POST /prepare   - Chuẩn bị GitHub Student (Step 0-5)   ║
+║    GET  /             - Trang chủ                         ║
+║    GET  /health       - Kiểm tra server                   ║
+║    POST /render       - Render HTML → base64              ║
+║    POST /prepare      - Chuẩn bị GitHub Student (b0-b5)   ║
+║    POST /check-status - Check verification status         ║
 ╠═══════════════════════════════════════════════════════════╣
 ║  curl_cffi: """ + ("✅ OK" if USE_CURL_CFFI else "❌ Not available") + """
 ║  Output: """ + OUTPUT_DIR + """
@@ -860,3 +973,4 @@ if __name__ == '__main__':
     """)
     
     app.run(host='0.0.0.0', port=5000, debug=False, threaded=True)
+

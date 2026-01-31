@@ -22,7 +22,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from config import settings
 from database import AsyncSessionLocal, init_db
-from models import User, PromoCode, PromoCodeUsage, VerificationOrder, BotSettings, OrderStatus, PaymentType
+from models import (
+    User, PromoCode, PromoCodeUsage, VerificationOrder, BotSettings, 
+    OrderStatus, PaymentType, GitHubStatus, VerificationQueue, QueueStatus
+)
 from keyboards import (
     gate_keyboard, main_menu_keyboard, verify_payment_keyboard,
     no_credit_keyboard, confirm_credit_keyboard, qr_payment_keyboard,
@@ -30,6 +33,11 @@ from keyboards import (
     admin_user_actions_keyboard, admin_codes_keyboard,
 )
 from states import AdminAuth, Verification, RedeemCode, AdminBroadcast, AdminUserSearch, AdminEditCredits
+from workers import (
+    get_worker, get_queue_worker, 
+    add_to_queue, build_queue_status_message, build_progress_message,
+    VERIFICATION_STEPS
+)
 
 # Logging
 logging.basicConfig(level=logging.INFO, stream=sys.stdout)
@@ -473,7 +481,7 @@ async def callback_cancel_order(callback: CallbackQuery, state: FSMContext):
 
 @router.message(Verification.waiting_cookie)
 async def handle_cookie_input(message: Message, state: FSMContext):
-    """Handle cookie input and start verification."""
+    """Handle cookie input and start verification with queue and progress display."""
     cookie = message.text.strip()
     
     if len(cookie) < 50 or "user_session" not in cookie.lower():
@@ -490,8 +498,6 @@ async def handle_cookie_input(message: Message, state: FSMContext):
     
     await state.set_state(Verification.processing)
     
-    processing_msg = await message.answer("⏳ Đang xử lý... Vui lòng đợi...")
-    
     async with AsyncSessionLocal() as session:
         result = await session.execute(
             select(VerificationOrder).where(VerificationOrder.id == order_id)
@@ -499,22 +505,71 @@ async def handle_cookie_input(message: Message, state: FSMContext):
         order = result.scalar_one_or_none()
         
         if not order:
-            await processing_msg.edit_text("❌ Lỗi: Không tìm thấy đơn hàng!")
+            await message.answer("❌ Lỗi: Không tìm thấy đơn hàng!")
             await state.clear()
             return
         
+        # Get user for queue check
+        user_result = await session.execute(
+            select(User).where(User.id == order.user_id)
+        )
+        user = user_result.scalar_one_or_none()
+        
         order.github_cookie = cookie
-        order.status = OrderStatus.PROCESSING
+        
+        # Check queue availability
+        queue_result = await add_to_queue(session, order, user)
         await session.commit()
         
-        # Call API Server /prepare
+        if queue_result.get("queued"):
+            # Vào hàng đợi
+            position = queue_result["position"]
+            total_processing = queue_result.get("total_processing", 5)
+            
+            queue_msg = build_queue_status_message(position, total_processing)
+            await message.answer(queue_msg, parse_mode="Markdown")
+            await state.clear()
+            return
+        
+        # Có slot - bắt đầu ngay với progress display
+        progress_msg = await message.answer(
+            build_progress_message(0),  # b0
+            parse_mode="Markdown"
+        )
+        
+        # Lưu message_id để update progress
+        order.progress_message_id = progress_msg.message_id
+        await session.commit()
+        
+        # Call API Server /prepare with progress updates
         try:
             async with aiohttp.ClientSession() as http:
+                # Step b0: Kiểm tra cookie
+                await progress_msg.edit_text(build_progress_message(0), parse_mode="Markdown")
+                
                 async with http.post(
                     f"{settings.api_server_url}/prepare",
                     json={"cookie": cookie, "order_id": order_id},
                     timeout=aiohttp.ClientTimeout(total=120)
                 ) as resp:
+                    # Simulate progress updates (b1-b5)
+                    for step_idx in range(1, 6):
+                        order.current_step = f"b{step_idx}"
+                        await session.commit()
+                        
+                        # Get school info for masking after b2
+                        school_name = None
+                        email = None
+                        if order.student_data:
+                            school_name = order.student_data.get('school_name')
+                            email = order.student_data.get('email')
+                        
+                        await progress_msg.edit_text(
+                            build_progress_message(step_idx, school_name, email),
+                            parse_mode="Markdown"
+                        )
+                        await asyncio.sleep(0.5)  # Brief delay for visual effect
+                    
                     result_data = await resp.json()
                     
                     if not result_data.get("success"):
@@ -522,8 +577,8 @@ async def handle_cookie_input(message: Message, state: FSMContext):
                         order.error_message = result_data.get("error", "Unknown error")
                         await session.commit()
                         
-                        await processing_msg.edit_text(
-                            f"❌ **Lỗi Step 0-5:**\n\n{order.error_message}",
+                        await progress_msg.edit_text(
+                            f"❌ **Lỗi xác minh:**\n\n{order.error_message}",
                             reply_markup=back_main_keyboard(),
                             parse_mode="Markdown"
                         )
@@ -537,11 +592,25 @@ async def handle_cookie_input(message: Message, state: FSMContext):
                     order.geo_lat = result_data.get("geo", {}).get("lat")
                     order.geo_lng = result_data.get("geo", {}).get("lng")
                     order.status = OrderStatus.SUBMITTING
+                    order.current_step = "b5"
                     await session.commit()
                     
-                    await processing_msg.edit_text("⏳ Đang submit đơn lên GitHub... (Step 6-7)")
+                    # Update progress with masked school info
+                    school_name = order.student_data.get('school_name') if order.student_data else None
+                    email = order.student_data.get('email') if order.student_data else None
+                    await progress_msg.edit_text(
+                        build_progress_message(5, school_name, email),
+                        parse_mode="Markdown"
+                    )
                     
-                    # Call VPS2 /submit
+                    # Call VPS2 /submit (b6-b7)
+                    order.current_step = "b6"
+                    await session.commit()
+                    await progress_msg.edit_text(
+                        build_progress_message(6, school_name, email),
+                        parse_mode="Markdown"
+                    )
+                    
                     async with http.post(
                         f"{settings.vps2_url}/submit",
                         json={
@@ -557,27 +626,35 @@ async def handle_cookie_input(message: Message, state: FSMContext):
                         submit_result = await resp2.json()
                         
                         if submit_result.get("success"):
-                            order.status = OrderStatus.COMPLETED
-                            order.submit_result = "Submitted successfully"
-                            order.completed_at = datetime.utcnow()
+                            # b7: Hoàn tất
+                            order.current_step = "b7"
+                            order.status = OrderStatus.SUBMITTED  # Đợi check kết quả
+                            order.submitted_at = datetime.utcnow()
+                            order.attempt_count = 0
                             await session.commit()
                             
-                            student = order.student_data or {}
+                            await progress_msg.edit_text(
+                                build_progress_message(7, school_name, email),
+                                parse_mode="Markdown"
+                            )
+                            await asyncio.sleep(1)
+                            
+                            # Final message
                             text = (
                                 "✅ **ĐÃ SUBMIT THÀNH CÔNG!**\n\n"
                                 f"👤 GitHub: `{order.github_username}`\n"
-                                f"🎓 Tên: {student.get('full_name', 'N/A')}\n"
-                                f"🏫 Trường: {student.get('school_name', 'N/A')}\n"
-                                f"📧 MSSV: {student.get('mssv', 'N/A')}\n\n"
-                                "📬 Kiểm tra email GitHub để xác nhận từ GitHub!"
+                                f"🏫 Trường: {mask_school_name(school_name)}\n\n"
+                                "⏳ **Đang đợi kết quả từ GitHub...**\n"
+                                "Hệ thống sẽ tự động kiểm tra sau 5 phút.\n\n"
+                                "📬 Bạn sẽ nhận được thông báo khi có kết quả!"
                             )
-                            await processing_msg.edit_text(text, reply_markup=back_main_keyboard(), parse_mode="Markdown")
+                            await progress_msg.edit_text(text, reply_markup=back_main_keyboard(), parse_mode="Markdown")
                         else:
                             order.status = OrderStatus.FAILED
                             order.error_message = submit_result.get("error", "Submit failed")
                             await session.commit()
                             
-                            await processing_msg.edit_text(
+                            await progress_msg.edit_text(
                                 f"❌ **Lỗi khi submit:**\n\n{order.error_message}",
                                 reply_markup=back_main_keyboard(),
                                 parse_mode="Markdown"
@@ -587,14 +664,28 @@ async def handle_cookie_input(message: Message, state: FSMContext):
             order.status = OrderStatus.FAILED
             order.error_message = "Timeout"
             await session.commit()
-            await processing_msg.edit_text("❌ Timeout! Vui lòng thử lại.", reply_markup=back_main_keyboard())
+            await progress_msg.edit_text("❌ Timeout! Vui lòng thử lại.", reply_markup=back_main_keyboard())
         except Exception as e:
             order.status = OrderStatus.FAILED
             order.error_message = str(e)
             await session.commit()
-            await processing_msg.edit_text(f"❌ Lỗi: {e}", reply_markup=back_main_keyboard())
+            await progress_msg.edit_text(f"❌ Lỗi: {e}", reply_markup=back_main_keyboard())
         
         await state.clear()
+
+
+def mask_school_name(name: str) -> str:
+    """Mask school name for privacy: 'Harvard University' → '███████ University'"""
+    if not name:
+        return "████████"
+    words = name.split()
+    masked = []
+    for word in words:
+        if len(word) > 3:
+            masked.append('█' * min(len(word), 10))
+        else:
+            masked.append(word)
+    return ' '.join(masked)
 
 
 @router.callback_query(F.data == "account")
@@ -1269,6 +1360,16 @@ async def main():
     logger.info("Starting notification poller...")
     asyncio.create_task(poll_payment_notifications())
     
+    # Start verification worker (check status, retry, refund)
+    logger.info("Starting verification worker...")
+    verification_worker = get_worker(bot)
+    asyncio.create_task(verification_worker.start())
+    
+    # Start queue worker (max 5 concurrent)
+    logger.info("Starting queue worker...")
+    queue_worker = get_queue_worker(bot)
+    asyncio.create_task(queue_worker.start())
+    
     await bot.delete_webhook(drop_pending_updates=True)
     await dp.start_polling(bot)
 
@@ -1276,8 +1377,15 @@ async def main():
 if __name__ == "__main__":
     print("""
 ╔═══════════════════════════════════════════════════════════╗
-║  🤖 GitHub Student Verification Bot                       ║
+║  🤖 GitHub Student Verification Bot v2.0                  ║
 ║  VPS1: Bot + API Server                                   ║
+╠═══════════════════════════════════════════════════════════╣
+║  Features:                                                ║
+║  • Auto-check status after 5 min                          ║
+║  • Retry up to 3 times if denied                          ║
+║  • Queue system (max 5 concurrent)                        ║
+║  • Progress display (b0-b7)                               ║
 ╚═══════════════════════════════════════════════════════════╝
 """)
     asyncio.run(main())
+
